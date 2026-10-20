@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sajilo Explorer - Compiler &amp; IR Viewer</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- Monaco Editor loader -->
+  <link rel="stylesheet" data-name="vs/editor/editor.main" href="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/editor/editor.main.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Victor+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500;1,600;1,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Global Header -->
+    <header class="top-nav">
+      <div class="nav-left">
+        <div class="brand">
+          <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+          <div class="brand-text">
+            <span class="brand-title">SAJILO</span>
+            <span class="brand-sub">EXPLORER</span>
+          </div>
+        </div>
+
+        <nav class="nav-menu">
+          <!-- Theme Dropdown -->
+          <div class="dropdown">
+            <button class="nav-btn dropdown-toggle" id="btn-theme-toggle">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;">
+                <circle cx="12" cy="12" r="5"></circle>
+                <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+              </svg>
+              <span>Theme: </span><span id="current-theme-label" style="font-weight:600;">Catppuccin</span> <span class="arrow">▾</span>
+            </button>
+            <div class="dropdown-menu theme-menu" id="theme-menu">
+              <a href="#" class="dropdown-item theme-item active" data-theme="catppuccin-mocha">
+                <span class="theme-color-dot" style="background:#cba6f7;"></span>
+                <span>Catppuccin Mocha (Vim)</span>
+              </a>
+              <a href="#" class="dropdown-item theme-item" data-theme="tokyo-night">
+                <span class="theme-color-dot" style="background:#7aa2f7;"></span>
+                <span>Tokyo Night (Vim)</span>
+              </a>
+              <a href="#" class="dropdown-item theme-item" data-theme="gruvbox-dark">
+                <span class="theme-color-dot" style="background:#fabd2f;"></span>
+                <span>Gruvbox Dark (Vim)</span>
+              </a>
+              <a href="#" class="dropdown-item theme-item" data-theme="nord">
+                <span class="theme-color-dot" style="background:#88c0d0;"></span>
+                <span>Nord</span>
+              </a>
+              <a href="#" class="dropdown-item theme-item" data-theme="vs-dark">
+                <span class="theme-color-dot" style="background:#007acc;"></span>
+                <span>VS Code Dark</span>
+              </a>
+            </div>
+          </div>
+
+          <div class="dropdown">
+            <button class="nav-btn dropdown-toggle">
+              Code Samples <span class="arrow">▾</span>
+            </button>
+            <div class="dropdown-menu">
+              <a href="#" class="dropdown-item" data-template="empty">Blank (Custom Code)</a>
+              <a href="#" class="dropdown-item" data-template="default">Sample Main Function</a>
+              <a href="#" class="dropdown-item" data-template="branching">Branching (Jaba / Natra)</a>
+              <a href="#" class="dropdown-item" data-template="nested">Nested Blocks & Return</a>
+              <a href="#" class="dropdown-item" data-template="syscalls">Syscalls (read / write / exit)</a>
+            </div>
+          </div>
+
+          <div class="dropdown">
+            <button class="nav-btn dropdown-toggle">
+              C++ Server Config <span class="arrow">▾</span>
+            </button>
+            <div class="dropdown-menu settings-popup">
+              <div class="setting-item">
+                <label for="server-url-input">C++ Server URL</label>
+                <input type="text" id="server-url-input" value="http://localhost:8080/compile" placeholder="http://localhost:8080/compile">
+              </div>
+              <div class="setting-item">
+                <label for="request-format-select">Request Format</label>
+                <select id="request-format-select" class="styled-select">
+                  <option value="json" selected>JSON: { "code": "..." }</option>
+                  <option value="raw">Raw Plain Text (text/plain)</option>
+                </select>
+              </div>
+              <div class="setting-item-row">
+                <label><input type="checkbox" id="auto-run-toggle"> Auto-run on typing (debounced)</label>
+              </div>
+              <div class="setting-item-row">
+                <label><input type="checkbox" id="sync-scroll-toggle" checked> Synchronize scrolling</label>
+              </div>
+            </div>
+          </div>
+        </nav>
+      </div>
+
+      <div class="nav-right">
+        <!-- C++ Server Connection Status Pill -->
+        <div class="status-pill status-mock" id="server-status-pill" title="Click to test connection to your C++ server">
+          <span class="status-dot"></span>
+          <span class="status-label" id="server-status-text">C++ Server: Standby</span>
+        </div>
+
+        <!-- Quick Clear Button -->
+        <button class="btn btn-ghost" id="btn-clear" title="Clear input editor to write custom code">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+          </svg>
+          <span>Clear</span>
+        </button>
+
+        <!-- RUN BUTTON -->
+        <button class="btn btn-run" id="btn-run" title="Run code on C++ Server (Ctrl + Enter)">
+          <svg class="btn-icon play-icon" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          <span class="btn-text">Run</span>
+          <kbd class="shortcut">Ctrl+↵</kbd>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace Splitter -->
+    <main class="workspace" id="workspace">
+      
+      <!-- LEFT PANE: Multi-file Code Input Editor with Tabs -->
+      <section class="pane pane-left" id="pane-left">
+        <div class="pane-header">
+          <div class="pane-tabs-wrapper">
+            <div class="pane-tabs" id="editor-tabs">
+              <!-- Dynamically populated file tabs -->
+            </div>
+            <button class="tab-add-btn" id="btn-add-tab" title="Add new file (+)">+</button>
+          </div>
+          <div class="pane-toolbar">
+            <div class="font-controls">
+              <button class="icon-btn" id="btn-font-dec-left" title="Decrease font size">A-</button>
+              <button class="icon-btn" id="btn-font-inc-left" title="Increase font size">A+</button>
+            </div>
+            <button class="icon-btn" id="btn-copy-src" title="Copy active code">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+            </button>
+            <button class="icon-btn" id="btn-download-src" title="Download active file">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+            </button>
+          </div>
+        </div>
+        
+        <div class="editor-container" id="editor-left"></div>
+      </section>
+
+      <!-- RESIZABLE SPLIT GUTTER -->
+      <div class="splitter" id="splitter" title="Drag to resize panes (Double click to reset 50/50)">
+        <div class="splitter-handle"></div>
+      </div>
+
+      <!-- RIGHT PANE: Generated Output Viewer -->
+      <section class="pane pane-right" id="pane-right">
+        <div class="pane-header">
+          <div class="pane-tabs">
+            <div class="tab active output-tab">
+              <span class="tab-title">Output</span>
+            </div>
+          </div>
+          <div class="pane-toolbar">
+            <div class="compile-badge" id="compile-duration">
+              <span class="pulse-dot"></span>
+              <span id="duration-text"></span>
+            </div>
+            <div class="font-controls">
+              <button class="icon-btn" id="btn-font-dec-right" title="Decrease font size">A-</button>
+              <button class="icon-btn" id="btn-font-inc-right" title="Increase font size">A+</button>
+            </div>
+            <button class="icon-btn" id="btn-copy-ir" title="Copy generated output">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+            </button>
+            <button class="icon-btn" id="btn-download-ir" title="Download generated output">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="editor-container" id="editor-right"></div>
+      </section>
+
+    </main>
+
+    <!-- Collapsible & Resizable Diagnostics / Console Drawer -->
+    <section class="drawer closed" id="console-drawer">
+      <div class="drawer-resizer" id="drawer-resizer" title="Drag up or down to resize console logs"></div>
+      <div class="drawer-header" id="drawer-toggle">
+        <div class="drawer-title">
+          <svg class="terminal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="4 17 10 11 4 5"></polyline>
+            <line x1="12" y1="19" x2="20" y2="19"></line>
+          </svg>
+          <span>C++ Server Diagnostics & Logs</span>
+          <span class="log-count-pill" id="log-count">0 messages</span>
+        </div>
+        <div class="drawer-actions">
+          <button class="icon-btn-sm" id="btn-clear-logs" title="Clear console">Clear</button>
+          <button class="icon-btn-sm drawer-toggle-btn" id="btn-collapse-toggle">▲</button>
+        </div>
+      </div>
+      <div class="drawer-content" id="console-output">
+        <div class="log-entry log-info">[System] UI ready. Type your custom Sajilo code on the left.</div>
+        <div class="log-entry log-dim">[System] Click 'Run' (Ctrl+Enter) to send your code to your C++ server.</div>
+        <div class="log-entry log-dim">[C++ Server] Target endpoint: <span class="url-highlight">http://localhost:8080/compile</span></div>
+      </div>
+    </section>
+
+    <!-- Bottom Status Bar -->
+    <footer class="bottom-bar">
+      <div class="bar-left">
+        <span class="bar-item" id="cursor-pos">Ln 1, Col 1</span>
+        <span class="bar-separator">|</span>
+        <span class="bar-item" id="code-length-display">0 chars</span>
+        <span class="bar-separator">|</span>
+        <span class="bar-item">UTF-8</span>
+      </div>
+      <div class="bar-center">
+        <span class="bar-item bar-endpoint" id="status-endpoint-display" title="Click to change C++ server URL">
+          C++ Server: <span class="endpoint-val">http://localhost:8080/compile</span>
+        </span>
+      </div>
+      <div class="bar-right">
+        <button class="bar-item bar-btn" id="toggle-console-btn">
+          <span>Server Log / Output</span>
+        </button>
+        <span class="bar-separator">|</span>
+        <span class="bar-item" id="ir-stats">0 lines</span>
+      </div>
+    </footer>
+
+    <!-- Toast Notification Container -->
+    <div class="toast-container" id="toast-container"></div>
+  </div>
+
+  <!-- Monaco Editor dependencies via CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
