@@ -32,6 +32,116 @@ const CONFIG = {
   syncScroll: true
 };
 
+// ============================================================================
+// 1.5 BROWSER LOCAL STORAGE PERSISTENCE (CODE, SETTINGS & WORKSPACE STATE)
+// ============================================================================
+const STORAGE_KEYS = {
+  FILES: 'sajilo_saved_files',
+  ACTIVE_FILE_ID: 'sajilo_active_file_id',
+  CONFIG: 'sajilo_config',
+  THEME: 'sajilo-theme',
+  LAST_OUTPUT: 'sajilo_last_output',
+  SPLIT_RATIO: 'sajilo_split_ratio',
+  DRAWER_HEIGHT: 'sajilo_drawer_height',
+  DRAWER_CLOSED: 'sajilo_drawer_closed'
+};
+
+let persistDebounceTimer = null;
+
+function saveFilesToLocalStorage() {
+  clearTimeout(persistDebounceTimer);
+  persistDebounceTimer = setTimeout(() => {
+    try {
+      if (typeof files !== 'undefined' && Array.isArray(files)) {
+        const serializableFiles = files.map(f => ({
+          id: f.id,
+          name: f.name,
+          content: f.content
+        }));
+        localStorage.setItem(STORAGE_KEYS.FILES, JSON.stringify(serializableFiles));
+        if (typeof activeFileId !== 'undefined') {
+          localStorage.setItem(STORAGE_KEYS.ACTIVE_FILE_ID, activeFileId);
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to save files to localStorage:', e);
+    }
+  }, 250);
+}
+
+function saveConfigToLocalStorage() {
+  try {
+    const toSave = {
+      serverUrl: CONFIG.serverUrl,
+      requestFormat: CONFIG.requestFormat,
+      autoRun: CONFIG.autoRun,
+      fontSize: CONFIG.fontSize,
+      syncScroll: CONFIG.syncScroll
+    };
+    localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(toSave));
+  } catch (e) {
+    console.warn('Failed to save config to localStorage:', e);
+  }
+}
+
+function loadConfigFromLocalStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.CONFIG);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.serverUrl === 'string' && parsed.serverUrl.trim()) {
+          CONFIG.serverUrl = parsed.serverUrl.trim();
+        }
+        if (parsed.requestFormat === 'json' || parsed.requestFormat === 'raw') {
+          CONFIG.requestFormat = parsed.requestFormat;
+        }
+        if (typeof parsed.autoRun === 'boolean') {
+          CONFIG.autoRun = parsed.autoRun;
+        }
+        if (typeof parsed.fontSize === 'number' && parsed.fontSize >= 10 && parsed.fontSize <= 24) {
+          CONFIG.fontSize = parsed.fontSize;
+        }
+        if (typeof parsed.syncScroll === 'boolean') {
+          CONFIG.syncScroll = parsed.syncScroll;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to load config from localStorage:', e);
+  }
+}
+
+function loadFilesFromLocalStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.FILES);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        files = parsed.map(f => ({
+          id: f.id || ('file-' + Date.now() + '-' + Math.floor(Math.random() * 1000)),
+          name: f.name || 'main.sj',
+          content: typeof f.content === 'string' ? f.content : '',
+          fileHandle: null
+        }));
+        const savedActiveId = localStorage.getItem(STORAGE_KEYS.ACTIVE_FILE_ID);
+        if (savedActiveId && files.some(f => f.id === savedActiveId)) {
+          activeFileId = savedActiveId;
+        } else {
+          activeFileId = files[0].id;
+        }
+        return true;
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to load files from localStorage:', e);
+  }
+  return false;
+}
+
+// Restore saved settings on initial script evaluation
+loadConfigFromLocalStorage();
+
 // Initial starter code in the custom input editor
 const STARTER_CODE = `func main(int var, int hell) -> deu(int) {
   manau int test = 10;
@@ -108,8 +218,253 @@ const WAITING_PLACEHOLDER = `; =================================================
 ; =====================================================================`;
 
 // ============================================================================
-// 2. MONACO LANGUAGE DEFINITIONS
+// 2. MONACO LANGUAGE DEFINITIONS & CODE FORMATTER
 // ============================================================================
+
+/**
+ * Formats a single line of Sajilo code, cleaning up operators, commas, and braces
+ * while strictly preserving comments and string literals.
+ */
+function formatLineTokens(line) {
+  const parts = [];
+  let inString = false;
+  let strBuffer = '';
+  let codeBuffer = '';
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"' && (i === 0 || line[i - 1] !== '\\')) {
+      if (inString) {
+        strBuffer += ch;
+        parts.push({ type: 'str', val: strBuffer });
+        strBuffer = '';
+        inString = false;
+      } else {
+        if (codeBuffer) {
+          parts.push({ type: 'code', val: codeBuffer });
+          codeBuffer = '';
+        }
+        strBuffer += ch;
+        inString = true;
+      }
+    } else if (inString) {
+      strBuffer += ch;
+    } else if (ch === '#') {
+      if (codeBuffer) {
+        parts.push({ type: 'code', val: codeBuffer });
+        codeBuffer = '';
+      }
+      parts.push({ type: 'comment', val: line.slice(i) });
+      break;
+    } else {
+      codeBuffer += ch;
+    }
+  }
+
+  if (strBuffer) parts.push({ type: 'str', val: strBuffer });
+  if (codeBuffer) parts.push({ type: 'code', val: codeBuffer });
+
+  return parts.map(p => {
+    if (p.type === 'str' || p.type === 'comment') return p.val;
+    let c = p.val;
+    // Spacing around commas: a,b -> a, b
+    c = c.replace(/\s*,\s*/g, ', ');
+    // Spacing around function arrow ->: a->b -> a -> b
+    c = c.replace(/\s*->\s*/g, ' -> ');
+    // Spacing around comparison operators: <=, >=, ==, !=
+    c = c.replace(/\s*(<=|>=|==|!=)\s*/g, ' $1 ');
+    // Spacing around single < and > (not part of <=, >=, ->)
+    c = c.replace(/(?<!-)\s*([<>])\s*(?!=)/g, ' $1 ');
+    // Spacing around assignment = (not ==, !=, <=, >=, +=, etc.)
+    c = c.replace(/(?<![!<>=+\-*/%])\s*=\s*(?!=)/g, ' = ');
+    // Spacing around + * / %
+    c = c.replace(/\s*([+*\/%])\s*/g, ' $1 ');
+    // Spacing around - (when not part of -> or negative number in brackets)
+    c = c.replace(/(?<!\()\s*-(?!>)\s*/g, ' - ');
+    // Ensure no space before semicolon
+    c = c.replace(/\s*;\s*$/g, ';');
+    // Ensure single space before opening brace {
+    c = c.replace(/([^\s])\{/g, '$1 {');
+    // Ensure single space after closing brace before keyword: }natra -> } natra
+    c = c.replace(/\}([^\s])/g, '} $1');
+    // Clean up multiple spaces
+    c = c.replace(/[ \t]{2,}/g, ' ');
+    return c;
+  }).join('');
+}
+
+/**
+ * Formats full Sajilo source code with clean 2-space block indentation,
+ * normalized line spacing, and operator alignment.
+ */
+function formatSajiloCode(code, indentSize = 2) {
+  if (!code) return '';
+  const lines = code.split(/\r?\n/);
+  let indentLevel = 0;
+  const formattedLines = [];
+  let prevLineWasBlank = false;
+
+  for (let rawLine of lines) {
+    let line = rawLine.trim();
+
+    if (line === '') {
+      if (!prevLineWasBlank && formattedLines.length > 0) {
+        formattedLines.push('');
+        prevLineWasBlank = true;
+      }
+      continue;
+    }
+    prevLineWasBlank = false;
+
+    // Preserve comments with proper indentation
+    if (line.startsWith('#')) {
+      formattedLines.push(' '.repeat(indentLevel * indentSize) + line);
+      continue;
+    }
+
+    // Adjust indent for lines starting with closing braces (e.g. '}', '} natra {')
+    let leadingCloses = 0;
+    let temp = line;
+    while (temp.startsWith('}')) {
+      leadingCloses++;
+      temp = temp.slice(1).trim();
+    }
+
+    let currentIndent = Math.max(0, indentLevel - leadingCloses);
+
+    // Format tokens on the line
+    let formattedLine = formatLineTokens(line);
+    formattedLines.push(' '.repeat(currentIndent * indentSize) + formattedLine);
+
+    // Calculate block opening and closing braces (excluding strings and comments)
+    let openCount = 0;
+    let closeCount = 0;
+    let inString = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"' && (i === 0 || line[i - 1] !== '\\')) {
+        inString = !inString;
+      } else if (!inString) {
+        if (char === '{') openCount++;
+        else if (char === '}') closeCount++;
+        else if (char === '#') break;
+      }
+    }
+
+    indentLevel = Math.max(0, indentLevel + openCount - closeCount);
+  }
+
+  return formattedLines.join('\n').trim() + '\n';
+}
+
+/**
+ * Toggles line comment (#) for single line or multi-line selection in editorLeft.
+ */
+function toggleLineComment() {
+  if (!editorLeft) return;
+  const selection = editorLeft.getSelection();
+  const model = editorLeft.getModel();
+  if (!selection || !model) return;
+
+  const startLine = selection.startLineNumber;
+  const endLine = selection.endLineNumber;
+
+  let allCommented = true;
+  let hasLines = false;
+
+  for (let ln = startLine; ln <= endLine; ln++) {
+    const text = model.getLineContent(ln);
+    const trimmed = text.trim();
+    if (trimmed.length > 0) {
+      hasLines = true;
+      if (!trimmed.startsWith('#')) {
+        allCommented = false;
+        break;
+      }
+    }
+  }
+
+  if (!hasLines) {
+    const lineContent = model.getLineContent(startLine);
+    const indent = lineContent.match(/^\s*/)[0];
+    model.pushEditOperations([], [{
+      range: new monaco.Range(startLine, 1, startLine, lineContent.length + 1),
+      text: indent + '# '
+    }], () => null);
+    return;
+  }
+
+  const edits = [];
+
+  if (allCommented) {
+    // Uncomment all selected lines
+    for (let ln = startLine; ln <= endLine; ln++) {
+      const lineContent = model.getLineContent(ln);
+      const newLine = lineContent.replace(/^(\s*)#\s?/, '$1');
+      edits.push({
+        range: new monaco.Range(ln, 1, ln, lineContent.length + 1),
+        text: newLine
+      });
+    }
+  } else {
+    // Comment all non-empty selected lines with unified minimum indentation
+    let minIndent = Infinity;
+    for (let ln = startLine; ln <= endLine; ln++) {
+      const lineContent = model.getLineContent(ln);
+      if (lineContent.trim().length > 0) {
+        const indentLen = lineContent.match(/^\s*/)[0].length;
+        if (indentLen < minIndent) minIndent = indentLen;
+      }
+    }
+    if (minIndent === Infinity) minIndent = 0;
+
+    for (let ln = startLine; ln <= endLine; ln++) {
+      const lineContent = model.getLineContent(ln);
+      if (lineContent.trim().length > 0) {
+        const before = lineContent.slice(0, minIndent);
+        const after = lineContent.slice(minIndent);
+        edits.push({
+          range: new monaco.Range(ln, 1, ln, lineContent.length + 1),
+          text: `${before}# ${after}`
+        });
+      }
+    }
+  }
+
+  model.pushEditOperations([], edits, () => null);
+}
+
+/**
+ * Triggers document formatting for the active file.
+ */
+function formatActiveFile() {
+  if (editorLeft && editorLeft.getAction) {
+    const action = editorLeft.getAction('editor.action.formatDocument');
+    if (action) {
+      action.run().then(() => {
+        showToast('Formatted active file', 'success');
+      }).catch(() => {
+        runManualFormat();
+      });
+      return;
+    }
+  }
+  runManualFormat();
+}
+
+function runManualFormat() {
+  const activeFile = getActiveFile();
+  if (!activeFile) return;
+  const current = (editorLeft && editorLeft.getValue) ? editorLeft.getValue() : activeFile.content;
+  const formatted = formatSajiloCode(current);
+  if (editorLeft && editorLeft.setValue) {
+    editorLeft.setValue(formatted);
+  }
+  activeFile.content = formatted;
+  saveFilesToLocalStorage();
+  showToast('Formatted active file', 'success');
+}
+
 function registerLanguages(monaco) {
   // Sajilo Source Language
   monaco.languages.register({ id: 'sajilo' });
@@ -137,6 +492,48 @@ function registerLanguages(monaco) {
         [/->|==|<=|>=|!=|[:+\-*\/%=<>!]/, 'operator'],
         [/[;,.]/, 'delimiter'],
       ]
+    }
+  });
+
+  // Sajilo language configuration: Comments (#) & Auto-Closing Brackets
+  monaco.languages.setLanguageConfiguration('sajilo', {
+    comments: {
+      lineComment: '#'
+    },
+    brackets: [
+      ['{', '}'],
+      ['[', ']'],
+      ['(', ')']
+    ],
+    autoClosingPairs: [
+      { open: '{', close: '}' },
+      { open: '[', close: ']' },
+      { open: '(', close: ')' },
+      { open: '"', close: '"', notIn: ['string'] },
+      { open: "'", close: "'", notIn: ['string', 'comment'] }
+    ],
+    surroundingPairs: [
+      { open: '{', close: '}' },
+      { open: '[', close: ']' },
+      { open: '(', close: ')' },
+      { open: '"', close: '"' },
+      { open: "'", close: "'" }
+    ],
+    indentationRules: {
+      increaseIndentPattern: /^.*\{[^}]*$/,
+      decreaseIndentPattern: /^\s*\}.*$/
+    }
+  });
+
+  // Sajilo Document Formatting Provider (Shift+Alt+F / Shift+Option+F)
+  monaco.languages.registerDocumentFormattingEditProvider('sajilo', {
+    provideDocumentFormattingEdits(model, options) {
+      const text = model.getValue();
+      const formatted = formatSajiloCode(text, options.tabSize || 2);
+      return [{
+        range: model.getFullModelRange(),
+        text: formatted
+      }];
     }
   });
 
@@ -170,6 +567,23 @@ function registerLanguages(monaco) {
         [/=|[+\-*\/]/, 'operator'],
       ]
     }
+  });
+
+  monaco.languages.setLanguageConfiguration('sajilo-ir', {
+    comments: {
+      lineComment: ';'
+    },
+    brackets: [
+      ['{', '}'],
+      ['[', ']'],
+      ['(', ')']
+    ],
+    autoClosingPairs: [
+      { open: '{', close: '}' },
+      { open: '[', close: ']' },
+      { open: '(', close: ')' },
+      { open: '"', close: '"', notIn: ['string'] }
+    ]
   });
 }
 
@@ -340,10 +754,15 @@ let files = [
   {
     id: 'file-1',
     name: 'main.sj',
-    content: STARTER_CODE
+    content: STARTER_CODE,
+    fileHandle: null
   }
 ];
 let activeFileId = 'file-1';
+
+// Restore any previously saved user files and tabs from localStorage
+loadFilesFromLocalStorage();
+
 const fileModels = new Map();
 
 function getActiveFile() {
@@ -359,6 +778,7 @@ function getOrCreateFileModel(file) {
     model.onDidChangeContent(() => {
       file.content = model.getValue();
       updateCodeStats();
+      saveFilesToLocalStorage();
       if (CONFIG.autoRun) {
         clearTimeout(autoRunTimer);
         autoRunTimer = setTimeout(() => {
@@ -409,6 +829,7 @@ function renderTabs() {
         if (!val) val = currentName;
         if (!val.endsWith('.sj')) val += '.sj';
         file.name = val;
+        saveFilesToLocalStorage();
         renderTabs();
       };
 
@@ -462,6 +883,7 @@ function renderTabs() {
 
 function switchToFile(fileId) {
   activeFileId = fileId;
+  saveFilesToLocalStorage();
   const file = getActiveFile();
   if (!file) return;
 
@@ -494,10 +916,12 @@ function addNewFile(customName, initialContent) {
   const newFile = {
     id: 'file-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
     name: name,
-    content: defaultContent
+    content: defaultContent,
+    fileHandle: null
   };
   files.push(newFile);
   switchToFile(newFile.id);
+  saveFilesToLocalStorage();
   showToast(`Created ${name}`);
 }
 
@@ -513,6 +937,7 @@ function closeFile(fileId) {
     try { fileModels.get(fileId).dispose(); } catch (_) {}
     fileModels.delete(fileId);
   }
+  saveFilesToLocalStorage();
   if (activeFileId === fileId) {
     const nextIdx = Math.max(0, idx - 1);
     switchToFile(files[nextIdx].id);
@@ -819,7 +1244,193 @@ async function runCodeOnCppServer() {
     isRunning = false;
     btnRun.classList.remove('running');
     if (btnRunText) btnRunText.textContent = 'Run';
+    try {
+      if (editorRight && editorRight.getValue) {
+        localStorage.setItem(STORAGE_KEYS.LAST_OUTPUT, editorRight.getValue());
+      }
+    } catch (_) {}
   }
+}
+
+// ============================================================================
+// 4.5 LOCAL DISK FILE SYSTEM ACCESS (CTRL+S & CTRL+O)
+// ============================================================================
+
+/**
+ * Saves the active file.
+ * If file was already saved or opened from disk (has fileHandle), writes directly to disk.
+ * Otherwise, opens the native save file picker (or triggers download fallback).
+ */
+async function saveCurrentFile() {
+  const activeFile = getActiveFile();
+  if (!activeFile) return;
+
+  if (editorLeft && editorLeft.getValue) {
+    activeFile.content = editorLeft.getValue();
+  }
+  const content = activeFile.content;
+
+  // 1. If we already have a saved local file handle, write directly to it without re-prompting
+  if (activeFile.fileHandle) {
+    try {
+      const writable = await activeFile.fileHandle.createWritable();
+      await writable.write(content);
+      await writable.close();
+      showToast(`Saved to ${activeFile.name}`, 'success');
+      logConsole(`[File] Saved changes directly to ${activeFile.name}`, 'success');
+      return;
+    } catch (err) {
+      console.warn('Could not write directly to existing file handle, prompting save picker:', err);
+      activeFile.fileHandle = null;
+    }
+  }
+
+  // 2. First-time save: prompt native save picker if supported
+  if ('showSaveFilePicker' in window) {
+    try {
+      const suggested = activeFile.name.endsWith('.sj') ? activeFile.name : `${activeFile.name}.sj`;
+      const handle = await window.showSaveFilePicker({
+        suggestedName: suggested,
+        types: [
+          {
+            description: 'Sajilo source file (*.sj)',
+            accept: {
+              'text/plain': ['.sj', '.txt']
+            }
+          }
+        ]
+      });
+
+      const writable = await handle.createWritable();
+      await writable.write(content);
+      await writable.close();
+
+      activeFile.fileHandle = handle;
+      if (handle.name && handle.name !== activeFile.name) {
+        activeFile.name = handle.name;
+        renderTabs();
+      }
+      showToast(`Saved ${activeFile.name} to disk`, 'success');
+      logConsole(`[File] Saved ${activeFile.name} to local disk`, 'success');
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        // User cancelled save dialog
+        return;
+      }
+      console.warn('showSaveFilePicker failed, falling back to download:', err);
+      downloadFile(activeFile.name, content);
+      return;
+    }
+  }
+
+  // 3. Fallback for browsers without File System Access API
+  downloadFile(activeFile.name, content);
+}
+
+/**
+ * Opens a native file dialog to load a file from disk into the editor.
+ */
+async function openFileFromDisk() {
+  if ('showOpenFilePicker' in window) {
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        types: [
+          {
+            description: 'Sajilo source file (*.sj, text files)',
+            accept: {
+              'text/plain': ['.sj', '.txt', '']
+            }
+          }
+        ],
+        multiple: false
+      });
+      const fileData = await handle.getFile();
+      const content = await fileData.text();
+      loadFileIntoEditor(fileData.name, content, handle);
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        // User cancelled open dialog
+        return;
+      }
+      console.warn('showOpenFilePicker failed, falling back to file input:', err);
+      fallbackOpenFileInput();
+      return;
+    }
+  }
+
+  fallbackOpenFileInput();
+}
+
+function fallbackOpenFileInput() {
+  let fileInput = document.getElementById('hidden-file-input');
+  if (!fileInput) {
+    fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.id = 'hidden-file-input';
+    fileInput.accept = '.sj,.txt,text/plain';
+    fileInput.style.display = 'none';
+    document.body.appendChild(fileInput);
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        loadFileIntoEditor(file.name, ev.target.result, null);
+      };
+      reader.readAsText(file);
+      fileInput.value = '';
+    });
+  }
+  fileInput.click();
+}
+
+function loadFileIntoEditor(filename, content, handle = null) {
+  const activeFile = getActiveFile();
+
+  // If current file is untouched starter code in single tab, replace it in-place
+  if (files.length === 1 && activeFile.name === 'main.sj' && activeFile.content === STARTER_CODE) {
+    activeFile.name = filename;
+    activeFile.content = content;
+    activeFile.fileHandle = handle;
+    const model = getOrCreateFileModel(activeFile);
+    if (model) model.setValue(content);
+    if (editorLeft && editorLeft.setValue) editorLeft.setValue(content);
+    saveFilesToLocalStorage();
+    renderTabs();
+    updateCodeStats();
+    showToast(`Loaded ${filename} from disk`, 'success');
+    logConsole(`[File] Loaded ${filename} from disk`, 'success');
+    return;
+  }
+
+  // Check if file with same name already exists in open tabs
+  const existing = files.find(f => f.name === filename);
+  if (existing) {
+    existing.content = content;
+    existing.fileHandle = handle;
+    const model = getOrCreateFileModel(existing);
+    if (model) model.setValue(content);
+    switchToFile(existing.id);
+    saveFilesToLocalStorage();
+    showToast(`Reloaded ${filename} from disk`, 'success');
+    logConsole(`[File] Reloaded ${filename} from disk`, 'success');
+    return;
+  }
+
+  // Otherwise, create a new tab for the loaded file
+  const newFile = {
+    id: 'file-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+    name: filename,
+    content: content,
+    fileHandle: handle
+  };
+  files.push(newFile);
+  switchToFile(newFile.id);
+  saveFilesToLocalStorage();
+  showToast(`Opened ${filename} from disk`, 'success');
+  logConsole(`[File] Opened ${filename} from disk`, 'success');
 }
 
 // ============================================================================
@@ -831,7 +1442,20 @@ function initSplitter() {
   const paneRight = document.getElementById('pane-right');
   const workspace = document.getElementById('workspace');
 
+  // Restore saved splitter proportion from localStorage
+  try {
+    const savedRatio = localStorage.getItem(STORAGE_KEYS.SPLIT_RATIO);
+    if (savedRatio) {
+      const parsed = parseFloat(savedRatio);
+      if (!isNaN(parsed) && parsed >= 15 && parsed <= 85) {
+        paneLeft.style.flex = `0 0 ${parsed}%`;
+        paneRight.style.flex = `0 0 ${100 - parsed}%`;
+      }
+    }
+  } catch (_) {}
+
   let isDragging = false;
+  let lastLeftPercentage = null;
 
   splitter.addEventListener('mousedown', () => {
     isDragging = true;
@@ -851,6 +1475,7 @@ function initSplitter() {
     const clampedOffset = Math.max(minWidth, Math.min(totalWidth - minWidth, offsetLeft));
 
     const leftPercentage = (clampedOffset / totalWidth) * 100;
+    lastLeftPercentage = leftPercentage;
     paneLeft.style.flex = `0 0 ${leftPercentage}%`;
     paneRight.style.flex = `0 0 ${100 - leftPercentage}%`;
 
@@ -864,6 +1489,11 @@ function initSplitter() {
       splitter.classList.remove('dragging');
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      if (lastLeftPercentage !== null) {
+        try {
+          localStorage.setItem(STORAGE_KEYS.SPLIT_RATIO, lastLeftPercentage.toFixed(1));
+        } catch (_) {}
+      }
       if (editorLeft) editorLeft.layout();
       if (editorRight) editorRight.layout();
     }
@@ -872,6 +1502,10 @@ function initSplitter() {
   splitter.addEventListener('dblclick', () => {
     paneLeft.style.flex = '1';
     paneRight.style.flex = '1';
+    lastLeftPercentage = null;
+    try {
+      localStorage.removeItem(STORAGE_KEYS.SPLIT_RATIO);
+    } catch (_) {}
     if (editorLeft) editorLeft.layout();
     if (editorRight) editorRight.layout();
     showToast('Reset split panes to 50/50');
@@ -923,7 +1557,17 @@ function initMonaco() {
       cursorBlinking: 'smooth',
       smoothScrolling: true,
       tabSize: 2,
-      minimap: { enabled: true, maxColumn: 40, renderCharacters: false }
+      minimap: { enabled: true, maxColumn: 40, renderCharacters: false },
+      // Auto-closing brackets, quotes, and surroundings
+      autoClosingBrackets: 'always',
+      autoClosingQuotes: 'always',
+      autoClosingDelete: 'always',
+      autoClosingOvertype: 'always',
+      autoSurround: 'languageDefined',
+      matchBrackets: 'always',
+      bracketPairColorization: { enabled: true },
+      formatOnType: true,
+      formatOnPaste: true
     };
 
     // Left Editor: Custom Code Input (Editable)
@@ -937,14 +1581,52 @@ function initMonaco() {
     });
 
     // Right Editor: Output File Viewer (out.ir) - Select and View Only, No Edit
+    let initialOutput = WAITING_PLACEHOLDER;
+    try {
+      const savedOutput = localStorage.getItem(STORAGE_KEYS.LAST_OUTPUT);
+      if (savedOutput && savedOutput.trim()) {
+        initialOutput = savedOutput;
+      }
+    } catch (_) {}
+
     editorRight = monaco.editor.create(document.getElementById('editor-right'), {
       ...commonOptions,
-      value: WAITING_PLACEHOLDER,
+      value: initialOutput,
       language: 'sajilo-ir',
       readOnly: true,              // View & select only, no editing
       domReadOnly: true,           // Disables keyboard inputs
       cursorStyle: 'line',         // Standard selectable text cursor
       contextmenu: true            // Allows right-click to select all and copy
+    });
+
+    // Monaco keyboard shortcuts for Comment (Ctrl+/), Format (Shift+Alt+F / Shift+Cmd+F), Save (Ctrl+S), Open (Ctrl+O), Run (Ctrl+Enter)
+    editorLeft.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash, () => {
+      toggleLineComment();
+    });
+    editorLeft.addCommand(monaco.KeyMod.Shift | monaco.KeyMod.Alt | monaco.KeyCode.KeyF, () => {
+      formatActiveFile();
+    });
+    editorLeft.addCommand(monaco.KeyMod.Shift | monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyF, () => {
+      formatActiveFile();
+    });
+    editorLeft.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+      saveCurrentFile();
+    });
+    editorLeft.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyO, () => {
+      openFileFromDisk();
+    });
+    editorLeft.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+      runCodeOnCppServer();
+    });
+
+    editorRight.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+      saveCurrentFile();
+    });
+    editorRight.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyO, () => {
+      openFileFromDisk();
+    });
+    editorRight.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+      runCodeOnCppServer();
     });
 
     applyTheme(currentTheme);
@@ -1073,21 +1755,61 @@ function setupEventListeners() {
     });
   }
 
+  // Open file button
+  const btnOpenSrc = document.getElementById('btn-open-src');
+  if (btnOpenSrc) {
+    btnOpenSrc.addEventListener('click', () => {
+      openFileFromDisk();
+    });
+  }
+
+  // Hidden file input change listener (for fallback open)
+  const hiddenFileInput = document.getElementById('hidden-file-input');
+  if (hiddenFileInput) {
+    hiddenFileInput.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        loadFileIntoEditor(file.name, ev.target.result, null);
+      };
+      reader.readAsText(file);
+      hiddenFileInput.value = '';
+    });
+  }
+
   // RUN BUTTON
   const btnRun = document.getElementById('btn-run');
   btnRun.addEventListener('click', () => {
     runCodeOnCppServer();
   });
 
-  // Keyboard shortcut: Ctrl+Enter / Cmd+Enter to Run
+  // Global Keyboard shortcuts:
+  // - Ctrl+Enter / Cmd+Enter: Run code on compiler server
+  // - Ctrl+S / Cmd+S: Save file directly to disk (or open save dialog if not yet saved)
+  // - Ctrl+O / Cmd+O: Open file dialog to load file from disk
+  // - Ctrl+/ / Cmd+/: Toggle line comment (#)
+  // - Shift+Alt+F / Shift+Cmd+F / Shift+Option+F: Format Sajilo code
   window.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
       runCodeOnCppServer();
     }
-    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
       e.preventDefault();
-      showToast('Source code saved in memory');
+      saveCurrentFile();
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'o' || e.key === 'O')) {
+      e.preventDefault();
+      openFileFromDisk();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+      e.preventDefault();
+      toggleLineComment();
+    }
+    if (e.shiftKey && (e.altKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      formatActiveFile();
     }
   });
 
@@ -1097,6 +1819,7 @@ function setupEventListeners() {
     btnClear.addEventListener('click', () => {
       const activeFile = getActiveFile();
       activeFile.content = '';
+      saveFilesToLocalStorage();
       if (editorLeft) {
         if (editorLeft.setValue) editorLeft.setValue('');
         if (editorLeft.focus) editorLeft.focus();
@@ -1112,6 +1835,7 @@ function setupEventListeners() {
     serverInput.value = CONFIG.serverUrl;
     serverInput.addEventListener('change', (e) => {
       CONFIG.serverUrl = e.target.value.trim();
+      saveConfigToLocalStorage();
       const endpointVal = endpointDisplay ? endpointDisplay.querySelector('.endpoint-val') : null;
       if (endpointVal) endpointVal.textContent = CONFIG.serverUrl;
       showToast(`Compiler server endpoint set to ${CONFIG.serverUrl}`);
@@ -1126,8 +1850,10 @@ function setupEventListeners() {
   // Request format select (JSON vs raw text)
   const formatSelect = document.getElementById('request-format-select');
   if (formatSelect) {
+    formatSelect.value = CONFIG.requestFormat;
     formatSelect.addEventListener('change', (e) => {
       CONFIG.requestFormat = e.target.value;
+      saveConfigToLocalStorage();
       showToast(`Request format set to: ${CONFIG.requestFormat}`);
     });
   }
@@ -1139,6 +1865,7 @@ function setupEventListeners() {
       if (newUrl && newUrl.trim()) {
         CONFIG.serverUrl = newUrl.trim();
         serverInput.value = CONFIG.serverUrl;
+        saveConfigToLocalStorage();
         const endpointVal = endpointDisplay.querySelector('.endpoint-val');
         if (endpointVal) endpointVal.textContent = CONFIG.serverUrl;
         showToast(`Compiler server endpoint set to ${CONFIG.serverUrl}`);
@@ -1149,8 +1876,10 @@ function setupEventListeners() {
   // Auto-run toggle
   const autoRunToggle = document.getElementById('auto-run-toggle');
   if (autoRunToggle) {
+    autoRunToggle.checked = CONFIG.autoRun;
     autoRunToggle.addEventListener('change', (e) => {
       CONFIG.autoRun = e.target.checked;
+      saveConfigToLocalStorage();
       showToast(CONFIG.autoRun ? 'Auto-run enabled on typing' : 'Auto-run disabled');
     });
   }
@@ -1158,8 +1887,10 @@ function setupEventListeners() {
   // Sync scroll toggle
   const syncToggle = document.getElementById('sync-scroll-toggle');
   if (syncToggle) {
+    syncToggle.checked = CONFIG.syncScroll;
     syncToggle.addEventListener('change', (e) => {
       CONFIG.syncScroll = e.target.checked;
+      saveConfigToLocalStorage();
     });
   }
 
@@ -1190,6 +1921,7 @@ function setupEventListeners() {
       if (CODE_TEMPLATES.hasOwnProperty(templateKey)) {
         const activeFile = getActiveFile();
         activeFile.content = CODE_TEMPLATES[templateKey];
+        saveFilesToLocalStorage();
         if (editorLeft && editorLeft.setValue) {
           editorLeft.setValue(activeFile.content);
         }
@@ -1198,6 +1930,21 @@ function setupEventListeners() {
       }
     });
   });
+
+  // Formatting and Commenting toolbar buttons
+  const btnFormatSrc = document.getElementById('btn-format-src');
+  if (btnFormatSrc) {
+    btnFormatSrc.addEventListener('click', () => {
+      formatActiveFile();
+    });
+  }
+
+  const btnCommentSrc = document.getElementById('btn-comment-src');
+  if (btnCommentSrc) {
+    btnCommentSrc.addEventListener('click', () => {
+      toggleLineComment();
+    });
+  }
 
   // Copy buttons
   document.getElementById('btn-copy-src').addEventListener('click', () => {
@@ -1214,11 +1961,9 @@ function setupEventListeners() {
     });
   });
 
-  // Download buttons
+  // Save / Download buttons
   document.getElementById('btn-download-src').addEventListener('click', () => {
-    const activeFile = getActiveFile();
-    const content = (editorLeft && editorLeft.getValue) ? editorLeft.getValue() : activeFile.content;
-    downloadFile(activeFile.name, content);
+    saveCurrentFile();
   });
 
   document.getElementById('btn-download-ir').addEventListener('click', () => {
@@ -1229,6 +1974,7 @@ function setupEventListeners() {
   // Font size buttons
   const changeFontSize = (delta) => {
     CONFIG.fontSize = Math.min(24, Math.max(10, CONFIG.fontSize + delta));
+    saveConfigToLocalStorage();
     if (editorLeft && editorLeft.updateOptions) editorLeft.updateOptions({ fontSize: CONFIG.fontSize });
     if (editorRight && editorRight.updateOptions) editorRight.updateOptions({ fontSize: CONFIG.fontSize });
   };
@@ -1248,6 +1994,25 @@ function setupEventListeners() {
   let startDragY = 0;
   let startDrawerHeight = 180;
   let savedDrawerHeight = 180;
+
+  // Restore saved console drawer state from localStorage
+  try {
+    const storedHeight = localStorage.getItem(STORAGE_KEYS.DRAWER_HEIGHT);
+    if (storedHeight) {
+      const parsedH = parseInt(storedHeight, 10);
+      if (!isNaN(parsedH) && parsedH >= 40 && parsedH <= 800) {
+        savedDrawerHeight = parsedH;
+      }
+    }
+    const storedClosed = localStorage.getItem(STORAGE_KEYS.DRAWER_CLOSED);
+    if (storedClosed === '0' && drawer) {
+      drawer.classList.remove('closed');
+      drawer.style.height = `${savedDrawerHeight}px`;
+    } else if (storedClosed === '1' && drawer) {
+      drawer.classList.add('closed');
+      drawer.style.height = '';
+    }
+  } catch (_) {}
 
   if (drawerResizer && drawer) {
     drawerResizer.addEventListener('mousedown', (e) => {
@@ -1295,6 +2060,10 @@ function setupEventListeners() {
         drawer.style.transition = '';
         document.body.style.cursor = '';
         document.body.style.userSelect = '';
+        try {
+          localStorage.setItem(STORAGE_KEYS.DRAWER_HEIGHT, savedDrawerHeight);
+          localStorage.setItem(STORAGE_KEYS.DRAWER_CLOSED, drawer.classList.contains('closed') ? '1' : '0');
+        } catch (_) {}
         if (editorLeft && editorLeft.layout) editorLeft.layout();
         if (editorRight && editorRight.layout) editorRight.layout();
       }
@@ -1310,6 +2079,10 @@ function setupEventListeners() {
       drawer.classList.add('closed');
       drawer.style.height = '';
     }
+    try {
+      localStorage.setItem(STORAGE_KEYS.DRAWER_HEIGHT, savedDrawerHeight);
+      localStorage.setItem(STORAGE_KEYS.DRAWER_CLOSED, drawer.classList.contains('closed') ? '1' : '0');
+    } catch (_) {}
     setTimeout(() => {
       if (editorLeft && editorLeft.layout) editorLeft.layout();
       if (editorRight && editorRight.layout) editorRight.layout();

@@ -532,6 +532,64 @@ int main(int argc, char *argv[])
                         "application/json");
     });
 
+    // OPTIONS preflight handler for /api/save-file
+    server.Options("/api/save-file", [](const httplib::Request &, httplib::Response &res) {
+        send_cors_headers(res);
+        res.status = 204;
+    });
+
+    // POST /api/save-file: Saves file directly to local laptop SSD via backend
+    server.Post("/api/save-file", [](const httplib::Request &req, httplib::Response &res) {
+        send_cors_headers(res);
+        json body = json::parse(req.body, nullptr, false);
+        if (body.is_discarded() || !body.is_object())
+        {
+            send_error(res, 400, "Request body must be a valid JSON object");
+            return;
+        }
+
+        std::string target_path;
+        if (body.contains("path") && body["path"].is_string() && !body["path"].get<std::string>().empty())
+        {
+            target_path = body["path"].get<std::string>();
+        }
+        else if (body.contains("filename") && body["filename"].is_string() && !body["filename"].get<std::string>().empty())
+        {
+            target_path = body["filename"].get<std::string>();
+        }
+        else
+        {
+            send_error(res, 400, "Missing 'path' or 'filename' parameter");
+            return;
+        }
+
+        std::string content;
+        if (body.contains("content") && body["content"].is_string())
+        {
+            content = body["content"].get<std::string>();
+        }
+
+        std::ofstream out(target_path, std::ios::out | std::ios::trunc);
+        if (!out.is_open())
+        {
+            send_error(res, 500, "Failed to write file to local disk: " + target_path);
+            return;
+        }
+
+        out << content;
+        out.close();
+
+        std::cout << "[Sajilo Server] Saved file to local SSD: " << target_path << " (" << content.size() << " bytes)\n";
+
+        res.status = 200;
+        res.set_content(json{
+                            {"status", true},
+                            {"path", target_path},
+                            {"bytes", content.size()}}
+                            .dump(),
+                        "application/json");
+    });
+
     std::cout << "========================================================\n";
     std::cout << " Sajilo C++ Server listening on http://localhost:" << port << "\n";
     if (!frontend_dir.empty())
