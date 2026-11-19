@@ -202,20 +202,12 @@ const CODE_TEMPLATES = {
 };
 
 // Placeholder shown in Output Viewer before the first run or when waiting for server
-const WAITING_PLACEHOLDER = `; =====================================================================
-; Waiting to run code on your C++ server
-; =====================================================================
-; 
-; 1. Enter or edit your custom Sajilo code on the left.
-; 2. Click the green "Run" button (or press Ctrl + Enter).
-; 3. Your C++ server at ${CONFIG.serverUrl} will receive the code,
-;    compile it with sajilo, and return the generated output here.
+const WAITING_PLACEHOLDER = `; out.asm: nothing built yet
 ;
-; Example C++ server endpoint:
-;   POST ${CONFIG.serverUrl}
-;   Payload: { "code": "<your-custom-code>" }
-;   Response: generated compilation output
-; =====================================================================`;
+;   build   Ctrl+Enter         compile the active .sj file to x86-64 (nasm)
+;   run     Ctrl+Shift+Enter   assemble, link and execute; output goes to the terminal
+;
+; endpoint  ${CONFIG.serverUrl}`;
 
 // ============================================================================
 // 2. MONACO LANGUAGE DEFINITIONS & CODE FORMATTER
@@ -442,7 +434,7 @@ function formatActiveFile() {
     const action = editorLeft.getAction('editor.action.formatDocument');
     if (action) {
       action.run().then(() => {
-        showToast('Formatted active file', 'success');
+        showToast('formatted', 'success');
       }).catch(() => {
         runManualFormat();
       });
@@ -462,7 +454,7 @@ function runManualFormat() {
   }
   activeFile.content = formatted;
   saveFilesToLocalStorage();
-  showToast('Formatted active file', 'success');
+  showToast('formatted', 'success');
 }
 
 function registerLanguages(monaco) {
@@ -604,11 +596,11 @@ function applyTheme(themeId) {
   } catch (_) {}
 
   const themeLabels = {
-    'catppuccin-mocha': 'Catppuccin',
-    'tokyo-night': 'Tokyo Night',
-    'gruvbox-dark': 'Gruvbox',
-    'nord': 'Nord',
-    'vs-dark': 'VS Dark'
+    'catppuccin-mocha': 'catppuccin',
+    'tokyo-night': 'tokyo-night',
+    'gruvbox-dark': 'gruvbox',
+    'nord': 'nord',
+    'vs-dark': 'vs-dark'
   };
 
   const labelElem = document.getElementById('current-theme-label');
@@ -801,10 +793,6 @@ function renderTabs() {
     tab.className = `tab ${file.id === activeFileId ? 'active' : ''}`;
     tab.title = `${file.name} (Click name to rename)`;
 
-    const icon = document.createElement('span');
-    icon.className = 'file-icon sj-icon';
-    icon.textContent = 'SJ';
-
     const title = document.createElement('span');
     title.className = 'tab-title';
     title.textContent = file.name;
@@ -858,7 +846,6 @@ function renderTabs() {
 
     title.addEventListener('dblclick', triggerRename);
 
-    tab.appendChild(icon);
     tab.appendChild(title);
 
     if (files.length > 1) {
@@ -922,12 +909,12 @@ function addNewFile(customName, initialContent) {
   files.push(newFile);
   switchToFile(newFile.id);
   saveFilesToLocalStorage();
-  showToast(`Created ${name}`);
+  showToast(`new file: ${name}`);
 }
 
 function closeFile(fileId) {
   if (files.length <= 1) {
-    showToast('Cannot close the last remaining file', 'warn');
+    showToast('cannot close the last file', 'warn');
     return;
   }
   const idx = files.findIndex(f => f.id === fileId);
@@ -944,7 +931,7 @@ function closeFile(fileId) {
   } else {
     renderTabs();
   }
-  showToast(`Closed ${removed.name}`);
+  showToast(`closed ${removed.name}`);
 }
 
 function getCombinedSourceCode() {
@@ -973,45 +960,95 @@ function getCombinedSourceCode() {
   return ordered.map(f => `// ================= [${f.name}] =================\n${f.content.trim()}`).join('\n\n');
 }
 
+const LOG_TAGS = { info: 'info', success: 'ok', warn: 'warn', error: 'err', dim: 'dbg' };
+
+function updateLogCount() {
+  const consoleOutput = document.getElementById('console-output');
+  const count = document.getElementById('log-count');
+  if (!consoleOutput || !count) return;
+  const n = consoleOutput.querySelectorAll('.log-entry').length;
+  count.textContent = n ? String(n) : '';
+}
+
 function logConsole(message, type = 'info') {
   const consoleOutput = document.getElementById('console-output');
-  const countPill = document.getElementById('log-count');
   if (!consoleOutput) return;
 
   const entry = document.createElement('div');
   entry.className = `log-entry log-${type}`;
-  entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+
+  const time = document.createElement('span');
+  time.className = 'log-time';
+  time.textContent = new Date().toLocaleTimeString([], { hour12: false });
+
+  const tag = document.createElement('span');
+  tag.className = 'log-tag';
+  tag.textContent = LOG_TAGS[type] || type;
+
+  const text = document.createElement('span');
+  text.className = 'log-text';
+  text.textContent = message;
+
+  entry.append(time, tag, text);
   consoleOutput.appendChild(entry);
+
+  // Keep the log bounded so long sessions stay responsive
+  while (consoleOutput.children.length > 500) consoleOutput.firstChild.remove();
   consoleOutput.scrollTop = consoleOutput.scrollHeight;
-
-  const totalLogs = consoleOutput.querySelectorAll('.log-entry').length;
-  if (countPill) countPill.textContent = `${totalLogs} logs`;
+  updateLogCount();
 }
 
+// Vim-style message slot in the statusline (replaces popup toasts)
+let statusMsgTimer = null;
 function showToast(message, type = 'info') {
-  const container = document.getElementById('toast-container');
-  if (!container) return;
-
-  const toast = document.createElement('div');
-  toast.className = `toast toast-${type}`;
-  toast.textContent = message;
-  container.appendChild(toast);
-
-  setTimeout(() => {
-    toast.style.opacity = '0';
-    toast.style.transform = 'translateY(10px)';
-    toast.style.transition = 'all 0.3s ease';
-    setTimeout(() => toast.remove(), 300);
-  }, 2600);
+  const slot = document.getElementById('status-msg');
+  if (!slot) return;
+  clearTimeout(statusMsgTimer);
+  slot.className = `sl-msg msg-${type}`;
+  slot.textContent = message;
+  slot.title = message;
+  statusMsgTimer = setTimeout(() => slot.classList.add('fade'), type === 'error' ? 8000 : 3500);
 }
 
-function updateServerStatus(status, text) {
-  const pill = document.getElementById('server-status-pill');
-  const label = document.getElementById('server-status-text');
-  if (!pill || !label) return;
+function endpointHost() {
+  try {
+    return new URL(CONFIG.serverUrl).host;
+  } catch (_) {
+    return CONFIG.serverUrl;
+  }
+}
 
-  pill.className = `status-pill status-${status}`;
-  label.textContent = text;
+function updateServerStatus(status) {
+  const dot = document.getElementById('server-status-pill');
+  const label = document.getElementById('server-status-text');
+  const wrap = document.getElementById('status-endpoint-display');
+  if (dot) dot.className = `status-dot status-${status}`;
+  if (label) label.textContent = endpointHost();
+  if (wrap) {
+    const state = status === 'online' ? 'reachable' : status === 'error' ? 'unreachable' : 'unknown';
+    wrap.title = `${CONFIG.serverUrl} (${state}). Click to change.`;
+  }
+}
+
+function setStatusMode(mode, label) {
+  const bar = document.querySelector('.statusline');
+  const modeEl = document.getElementById('sl-mode');
+  if (bar) {
+    bar.classList.toggle('error-mode', mode === 'error');
+    bar.classList.toggle('busy-mode', mode === 'busy');
+  }
+  if (modeEl) modeEl.textContent = label || 'sajilo';
+}
+
+function setBuildState(state, text) {
+  const el = document.getElementById('build-state');
+  if (!el) return;
+  el.className = `pane-state ${state || ''}`;
+  el.textContent = text || '';
+}
+
+function formatBytes(n) {
+  return n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KiB`;
 }
 
 function updateCodeStats() {
@@ -1019,7 +1056,7 @@ function updateCodeStats() {
   const val = editorLeft.getValue();
   const lenElem = document.getElementById('code-length-display');
   if (lenElem) {
-    lenElem.textContent = `${val.length} chars`;
+    lenElem.textContent = formatBytes(new Blob([val]).size);
   }
 }
 
@@ -1040,13 +1077,24 @@ async function checkServerHealth() {
     const res = await fetch(healthUrl, { method: 'GET', signal: controller.signal });
     clearTimeout(timeoutId);
     if (res.ok) {
-      updateServerStatus('online', 'C++ Server: Online');
-      logConsole(`C++ Server reachable at ${healthUrl}`, 'success');
+      updateServerStatus('online');
+      let runner = '';
+      try {
+        const info = await res.json();
+        runner = info.runner || '';
+      } catch (_) {}
+      const runnerEl = document.getElementById('runner-label');
+      if (runnerEl && runner) {
+        runnerEl.textContent = runner === 'docker' ? 'linux/amd64 (docker)' : 'native x86-64';
+      }
+      logConsole(`server up: ${healthUrl}${runner ? ` (runner: ${runner})` : ''}`, 'success');
       return true;
     }
   } catch (_) {
-    // Keep standby or current status
+    // fall through
   }
+  updateServerStatus('error');
+  logConsole(`server unreachable: ${CONFIG.serverUrl}`, 'error');
   return false;
 }
 
@@ -1083,172 +1131,325 @@ function clearEditorErrors() {
   }
 }
 
+// Tracks the last successful build so `run` knows whether to rebuild first.
+let lastBuild = { source: null, fileId: null, ok: false };
+
+function commentBlock(text) {
+  return String(text).split('\n').map(l => (l ? `; ${l}` : ';')).join('\n');
+}
+
 /**
- * Takes the currently active file from the editor, sends it to the C++ server
- * via HTTP POST, and displays the generated output in the right editor.
- * Only the active (open) file is compiled — not the combined multi-file source.
+ * Compiles the active file on the server and shows the x86-64 assembly in the
+ * right pane. Resolves to true when the build succeeded.
  */
 async function runCodeOnCppServer() {
-  if (isRunning || !editorLeft || !editorRight) return;
+  if (isRunning || !editorLeft || !editorRight) return false;
 
   const activeFile = getActiveFile();
-  // Always capture the latest editor content into the active file
-  if (editorLeft && editorLeft.getValue) {
-    activeFile.content = editorLeft.getValue();
-  }
-
-  // Run ONLY the currently open (active) file — not combined multi-file output
+  if (editorLeft.getValue) activeFile.content = editorLeft.getValue();
   const sourceCode = activeFile.content;
-  const btnRun = document.getElementById('btn-run');
-  const btnRunText = btnRun.querySelector('.btn-text');
-  const durationText = document.getElementById('duration-text');
-  const compileBadge = document.getElementById('compile-duration');
-  const bottomBar = document.querySelector('.bottom-bar');
 
   if (!sourceCode.trim()) {
-    showToast('Input is empty. Enter some Sajilo code first!', 'error');
-    return;
+    showToast(`${activeFile.name} is empty`, 'error');
+    return false;
   }
 
+  const btnRun = document.getElementById('btn-run');
+  const btnRunText = btnRun ? btnRun.querySelector('.btn-text') : null;
+
   isRunning = true;
-  btnRun.classList.add('running');
-  if (btnRunText) btnRunText.textContent = 'Running...';
-  if (durationText) durationText.textContent = 'Sending to C++ server...';
+  if (btnRun) btnRun.classList.add('running');
+  if (btnRunText) btnRunText.textContent = 'building';
+  setBuildState('busy', 'building');
+  setStatusMode('busy', 'build');
 
   const startTime = performance.now();
-  logConsole(`Compiling [${activeFile.name}] (${sourceCode.length} chars) via ${CONFIG.serverUrl}...`, 'dim');
+  logConsole(`build ${activeFile.name} (${sourceCode.length} chars) -> POST ${CONFIG.serverUrl}`, 'dim');
+
+  let ok = false;
+  const fail = (title, detail) => {
+    editorRight.setValue(commentBlock(`${title}\n\n${detail}`));
+    setBuildState('err', 'build failed');
+    setStatusMode('error', 'error');
+    logConsole(`${title}: ${detail}`, 'error');
+    showToast(`${title}: ${String(detail).split('\n')[0]}`, 'error');
+  };
 
   try {
-    // Build request payload — send only the active (open) file
-    let headers = {};
-    let bodyData = null;
-
+    let headers;
+    let body;
     if (CONFIG.requestFormat === 'json') {
-      headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json, text/plain, */*'
-      };
-      bodyData = JSON.stringify({
+      headers = { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*' };
+      body = JSON.stringify({
         code: sourceCode,
         filename: activeFile.name,
-        // Send only the active file (not all files)
         files: [{ name: activeFile.name, content: sourceCode }]
       });
     } else {
-      headers = {
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Accept': 'text/plain, */*'
-      };
-      bodyData = sourceCode;
+      headers = { 'Content-Type': 'text/plain; charset=utf-8', 'Accept': 'text/plain, */*' };
+      body = sourceCode;
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
-
-    const response = await fetch(CONFIG.serverUrl, {
-      method: 'POST',
-      headers: headers,
-      body: bodyData,
-      signal: controller.signal
-    });
-
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const response = await fetch(CONFIG.serverUrl, { method: 'POST', headers, body, signal: controller.signal });
     clearTimeout(timeoutId);
+    const elapsedMs = Math.round(performance.now() - startTime);
+    updateServerStatus('online');
 
-    const elapsed = ((performance.now() - startTime) / 1000).toFixed(3);
-
-    if (response.ok) {
-      const contentType = response.headers.get('content-type') || '';
-
-      if (contentType.includes('application/json')) {
-        const json = await response.json();
-
-        // Explicitly check status: true or false
-        if (json.status === true) {
-          // Status TRUE: show compiled output in the viewer
-          clearEditorErrors();
-          const outputContent = json.output || json.ir || '';
-          editorRight.setValue(outputContent);
-          updateOutputStats();
-          if (compileBadge) compileBadge.classList.remove('error');
-          if (bottomBar) bottomBar.classList.remove('error-mode');
-          if (durationText) durationText.textContent = `Generated in ${elapsed}s`;
-          updateServerStatus('online', 'C++ Server: Online');
-          logConsole(`[Sajilo] Compilation succeeded (${elapsed}s, ${outputContent.length} bytes)`, 'success');
-          showToast(`Compiled successfully in ${elapsed}s!`, 'success');
-        } else {
-          // Status FALSE: format and display error in vivid proper red
-          const rawError = (json.error || json.output || 'Unknown compilation error').trim();
-          editorRight.setValue(`[ERROR] Sajilo Compilation Failed:\n${'='.repeat(68)}\n\n${rawError}\n\n${'='.repeat(68)}`);
-          updateOutputStats();
-          if (compileBadge) compileBadge.classList.add('error');
-          if (bottomBar) bottomBar.classList.add('error-mode');
-          if (durationText) durationText.textContent = `Compilation Error (${elapsed}s)`;
-          updateServerStatus('online', 'C++ Server: Online');
-          logConsole(`[Sajilo Error] ${rawError}`, 'error');
-          showToast(`Compilation error: check output viewer`, 'error');
-          highlightErrorInEditor(rawError);
-        }
-
-        if (json.stderr) {
-          logConsole(`[C++ Stderr] ${json.stderr}`, 'warn');
-        }
-      } else {
-        // Raw text response
-        clearEditorErrors();
-        const outputContent = await response.text();
-        editorRight.setValue(outputContent);
-        updateOutputStats();
-        if (compileBadge) compileBadge.classList.remove('error');
-        if (bottomBar) bottomBar.classList.remove('error-mode');
-        if (durationText) durationText.textContent = `Generated in ${elapsed}s`;
-        updateServerStatus('online', 'C++ Server: Online');
-        logConsole(`Output received (${elapsed}s, ${outputContent.length} bytes)`, 'success');
-        showToast(`Output generated in ${elapsed}s!`, 'success');
-      }
-
-    } else {
+    if (!response.ok) {
       let errorText = '';
       try {
         const errJson = await response.json();
         errorText = errJson.error || errJson.output || JSON.stringify(errJson);
       } catch (_) {
-        errorText = await response.text();
+        errorText = response.statusText;
       }
-      if (compileBadge) compileBadge.classList.add('error');
-      if (bottomBar) bottomBar.classList.add('error-mode');
-      editorRight.setValue(`[ERROR] Server Error (HTTP ${response.status}):\n${'='.repeat(68)}\n\n${errorText || response.statusText}\n\n${'='.repeat(68)}`);
-      updateOutputStats();
-      if (durationText) durationText.textContent = `Error (${elapsed}s)`;
-      logConsole(`Compiler error (HTTP ${response.status}): ${errorText}`, 'error');
-      showToast(`Server error`, 'error');
+      fail(`server error (HTTP ${response.status})`, errorText);
+      return false;
+    }
+
+    let output;
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const json = await response.json();
+      if (json.stderr) logConsole(`compiler stderr: ${json.stderr}`, 'warn');
+      if (json.status !== true) {
+        const rawError = String(json.error || json.output || 'unknown compilation error').trim();
+        fail(`build failed: ${activeFile.name}`, rawError);
+        highlightErrorInEditor(rawError);
+        return false;
+      }
+      output = json.output || json.ir || '';
+    } else {
+      output = await response.text();
+    }
+
+    clearEditorErrors();
+    setAsmErrorMarkers('');
+    editorRight.setValue(output);
+    updateOutputStats();
+    setBuildState('ok', 'built');
+    setStatusMode('normal');
+    const lines = output ? output.split('\n').length : 0;
+    logConsole(`build ok: ${activeFile.name} -> out.asm, ${lines} lines, ${elapsedMs} ms`, 'success');
+    showToast(`built ${activeFile.name}`, 'success');
+    lastBuild = { source: sourceCode, fileId: activeFile.id, ok: true };
+    ok = true;
+  } catch (err) {
+    const msg = err.name === 'AbortError' ? 'request timed out' : err.message;
+    updateServerStatus('error');
+    setBuildState('err', 'offline');
+    setStatusMode('error', 'error');
+    editorRight.setValue(commentBlock(
+      `cannot reach ${CONFIG.serverUrl}\n${msg}\n\nstart the server:\n  ./build/backend/sajilo_server\n\nor change the endpoint under config.`
+    ));
+    logConsole(`connection failed: ${msg}`, 'error');
+    showToast(`cannot reach ${endpointHost()}`, 'error');
+  } finally {
+    isRunning = false;
+    if (btnRun) btnRun.classList.remove('running');
+    if (btnRunText) btnRunText.textContent = 'build';
+    if (!ok) lastBuild.ok = false;
+    try {
+      localStorage.setItem(STORAGE_KEYS.LAST_OUTPUT, editorRight.getValue());
+    } catch (_) {}
+  }
+  return ok;
+}
+
+// ============================================================================
+// 4.2 RUN GENERATED x86-64 CODE (TERMINAL)
+// ============================================================================
+
+let isExecuting = false;
+
+function getRunUrl() {
+  if (/\/compile\/?$/.test(CONFIG.serverUrl)) {
+    return CONFIG.serverUrl.replace(/\/compile\/?$/, '/run');
+  }
+  try {
+    return new URL('/run', CONFIG.serverUrl).toString();
+  } catch (_) {
+    return 'http://localhost:8080/run';
+  }
+}
+
+function termPrint(text, cls = 'term-stdout') {
+  const term = document.getElementById('terminal-output');
+  if (!term) return;
+  const line = document.createElement('div');
+  line.className = `term-line ${cls}`;
+  line.textContent = text;
+  term.appendChild(line);
+  term.scrollTop = term.scrollHeight;
+}
+
+function termSeparator() {
+  const term = document.getElementById('terminal-output');
+  if (!term || !term.children.length) return;
+  const sep = document.createElement('div');
+  sep.className = 'term-separator';
+  term.appendChild(sep);
+}
+
+function showDrawerPanel(panelId) {
+  document.querySelectorAll('.drawer-tab').forEach(tab => {
+    tab.classList.toggle('active', tab.dataset.panel === panelId);
+  });
+  document.querySelectorAll('.drawer-panel').forEach(panel => {
+    panel.classList.toggle('active', panel.dataset.panelId === panelId);
+  });
+}
+
+function openDrawer() {
+  const drawer = document.getElementById('console-drawer');
+  if (!drawer || !drawer.classList.contains('closed')) return;
+  let height = 240;
+  try {
+    const stored = parseInt(localStorage.getItem(STORAGE_KEYS.DRAWER_HEIGHT), 10);
+    if (!isNaN(stored) && stored >= 120 && stored <= 800) height = stored;
+    localStorage.setItem(STORAGE_KEYS.DRAWER_CLOSED, '0');
+  } catch (_) {}
+  drawer.classList.remove('closed');
+  drawer.style.height = `${height}px`;
+  setTimeout(() => {
+    if (editorLeft && editorLeft.layout) editorLeft.layout();
+    if (editorRight && editorRight.layout) editorRight.layout();
+  }, 250);
+}
+
+function setAsmErrorMarkers(assemblerOutput) {
+  if (!editorRight || typeof monaco === 'undefined' || !editorRight.getModel) return;
+  const markers = [];
+  const re = /prog\.asm:(\d+):\s*(error|warning):\s*(.*)/gi;
+  let m;
+  while ((m = re.exec(assemblerOutput || '')) !== null) {
+    markers.push({
+      startLineNumber: parseInt(m[1], 10),
+      startColumn: 1,
+      endLineNumber: parseInt(m[1], 10),
+      endColumn: 1000,
+      message: `nasm: ${m[3]}`,
+      severity: m[2].toLowerCase() === 'error' ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning
+    });
+  }
+  monaco.editor.setModelMarkers(editorRight.getModel(), 'nasm', markers);
+}
+
+async function runX86Program() {
+  if (isExecuting || isRunning || !editorRight) return;
+
+  const btnExec = document.getElementById('btn-exec');
+  const btnExecText = btnExec ? btnExec.querySelector('.btn-text') : null;
+  const setBusy = (busy) => {
+    isExecuting = busy;
+    if (btnExec) btnExec.classList.toggle('running', busy);
+    if (btnExecText) btnExecText.textContent = busy ? 'running' : 'run';
+  };
+
+  setBusy(true);
+  try {
+    // Rebuild first if the source changed since the last successful build.
+    const activeFile = getActiveFile();
+    const currentSource = editorLeft && editorLeft.getValue ? editorLeft.getValue() : activeFile.content;
+    const stale = !lastBuild.ok || lastBuild.source !== currentSource || lastBuild.fileId !== activeFile.id;
+    if (stale) {
+      isExecuting = false; // let the build proceed
+      const built = await runCodeOnCppServer();
+      isExecuting = true;
+      if (!built) {
+        openDrawer();
+        showDrawerPanel('terminal-output');
+        termSeparator();
+        termPrint('build failed; nothing to run (see out.asm)', 'term-err');
+        return;
+      }
+    }
+
+    const asm = editorRight.getValue();
+    if (!/\bsection\s+\.text\b|\bglobal\s+_start\b|^_start:/m.test(asm)) {
+      showToast('out.asm has no x86-64 entry point (_start)', 'error');
       return;
     }
 
-  } catch (err) {
-    const elapsed = ((performance.now() - startTime) / 1000).toFixed(3);
-    updateServerStatus('error', 'C++ Server: Failed');
-    if (compileBadge) compileBadge.classList.add('error');
-    if (bottomBar) bottomBar.classList.add('error-mode');
-    if (durationText) durationText.textContent = `Error (${elapsed}s)`;
+    const stdinInput = document.getElementById('terminal-stdin-input');
+    let stdinData = stdinInput ? stdinInput.value : '';
+    if (stdinData && !stdinData.endsWith('\n')) stdinData += '\n';
 
-    logConsole(`Connection failed: ${err.message}`, 'error');
-    logConsole(`Please verify your C++ server is listening on ${CONFIG.serverUrl} and has CORS enabled`, 'dim');
+    openDrawer();
+    showDrawerPanel('terminal-output');
+    termSeparator();
+    setAsmErrorMarkers('');
+    setStatusMode('busy', 'run');
 
-    // Show diagnostic in proper error red format
-    editorRight.setValue(`[ERROR] Could Not Connect to C++ Server:\n${'='.repeat(68)}\n\nEndpoint: ${CONFIG.serverUrl}\nDetails: ${err.message}\n\nTroubleshooting:\n1. Make sure your C++ server is started and listening on port 8080\n2. Ensure your server sends CORS headers:\n     Access-Control-Allow-Origin: *\n3. Once your server is running, click "Run" again!\n\n${'='.repeat(68)}`);
+    const prog = (activeFile.name || 'prog.sj').replace(/\.sj$/i, '');
+    termPrint(`nasm -f elf64 ${prog}.asm && ld -o ${prog} ${prog}.o`, 'term-cmd');
+    termPrint(`./${prog}${stdinData ? ` <<< ${JSON.stringify(stdinData.replace(/\n$/, ''))}` : ''}`, 'term-cmd');
 
-    showToast(`Failed to reach C++ server at ${CONFIG.serverUrl}`, 'error');
-    updateOutputStats();
-
-  } finally {
-    isRunning = false;
-    btnRun.classList.remove('running');
-    if (btnRunText) btnRunText.textContent = 'Run';
+    const startTime = performance.now();
+    let json;
     try {
-      if (editorRight && editorRight.getValue) {
-        localStorage.setItem(STORAGE_KEYS.LAST_OUTPUT, editorRight.getValue());
+      const controller = new AbortController();
+      // Generous: the first run may build the docker runner image.
+      const timeoutId = setTimeout(() => controller.abort(), 180000);
+      const response = await fetch(getRunUrl(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ asm, stdin: stdinData }),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      try {
+        json = await response.json();
+      } catch (_) {
+        throw new Error(`unexpected response (HTTP ${response.status})`);
       }
-    } catch (_) {}
+      if (!response.ok) throw new Error(json.error || `HTTP ${response.status}`);
+    } catch (err) {
+      const msg = err.name === 'AbortError' ? 'request timed out' : err.message;
+      termPrint(`runner: ${msg}`, 'term-err');
+      logConsole(`run failed: ${msg}`, 'error');
+      showToast(`run failed: ${msg.split('\n')[0]}`, 'error');
+      setStatusMode('error', 'error');
+      return;
+    }
+
+    const elapsedMs = Math.round(performance.now() - startTime);
+
+    if (json.stage === 'assemble' || json.stage === 'link') {
+      setAsmErrorMarkers(json.assembler_output);
+      termPrint(json.error, 'term-err');
+      logConsole(`${json.stage} failed`, 'error');
+      showToast(json.stage === 'assemble' ? 'nasm: assembly failed' : 'ld: link failed', 'error');
+      setStatusMode('error', 'error');
+      return;
+    }
+
+    if (!json.status) {
+      termPrint(json.error || 'run failed', 'term-err');
+      logConsole(`run failed: ${json.error || ''}`, 'error');
+      showToast('run failed', 'error');
+      setStatusMode('error', 'error');
+      return;
+    }
+
+    if (json.assembler_output) termPrint(json.assembler_output, 'term-warn');
+    if (json.stdout) termPrint(json.stdout.replace(/\n$/, ''), 'term-stdout');
+    if (json.stderr) termPrint(json.stderr.replace(/\n$/, ''), 'term-stderr');
+
+    if (json.timed_out || json.signal) {
+      termPrint(`[${json.error}]`, 'term-err');
+      showToast(json.timed_out ? 'killed: time limit' : 'program crashed', 'error');
+      setStatusMode('error', 'error');
+    } else {
+      termPrint(`[exit ${json.exit_code}]`, json.exit_code === 0 ? 'term-ok' : 'term-warn');
+      setStatusMode('normal');
+    }
+    logConsole(`run ${prog}: exit=${json.exit_code}${json.signal ? ` signal=${json.signal}` : ''}, ${json.duration_ms ?? elapsedMs} ms, ${json.runner}`,
+      json.exit_code === 0 ? 'success' : 'warn');
+  } finally {
+    setBusy(false);
   }
 }
 
@@ -1276,8 +1477,8 @@ async function saveCurrentFile() {
       const writable = await activeFile.fileHandle.createWritable();
       await writable.write(content);
       await writable.close();
-      showToast(`Saved to ${activeFile.name}`, 'success');
-      logConsole(`[File] Saved changes directly to ${activeFile.name}`, 'success');
+      showToast(`written: ${activeFile.name}`, 'success');
+      logConsole(`write ${activeFile.name}`, 'success');
       return;
     } catch (err) {
       console.warn('Could not write directly to existing file handle, prompting save picker:', err);
@@ -1310,8 +1511,8 @@ async function saveCurrentFile() {
         activeFile.name = handle.name;
         renderTabs();
       }
-      showToast(`Saved ${activeFile.name} to disk`, 'success');
-      logConsole(`[File] Saved ${activeFile.name} to local disk`, 'success');
+      showToast(`written: ${activeFile.name}`, 'success');
+      logConsole(`write ${activeFile.name}`, 'success');
       return;
     } catch (err) {
       if (err.name === 'AbortError') {
@@ -1400,8 +1601,8 @@ function loadFileIntoEditor(filename, content, handle = null) {
     saveFilesToLocalStorage();
     renderTabs();
     updateCodeStats();
-    showToast(`Loaded ${filename} from disk`, 'success');
-    logConsole(`[File] Loaded ${filename} from disk`, 'success');
+    showToast(`opened ${filename}`, 'success');
+    logConsole(`open ${filename}`, 'success');
     return;
   }
 
@@ -1414,8 +1615,8 @@ function loadFileIntoEditor(filename, content, handle = null) {
     if (model) model.setValue(content);
     switchToFile(existing.id);
     saveFilesToLocalStorage();
-    showToast(`Reloaded ${filename} from disk`, 'success');
-    logConsole(`[File] Reloaded ${filename} from disk`, 'success');
+    showToast(`reloaded ${filename}`, 'success');
+    logConsole(`reload ${filename}`, 'success');
     return;
   }
 
@@ -1429,8 +1630,8 @@ function loadFileIntoEditor(filename, content, handle = null) {
   files.push(newFile);
   switchToFile(newFile.id);
   saveFilesToLocalStorage();
-  showToast(`Opened ${filename} from disk`, 'success');
-  logConsole(`[File] Opened ${filename} from disk`, 'success');
+  showToast(`opened ${filename}`, 'success');
+  logConsole(`open ${filename}`, 'success');
 }
 
 // ============================================================================
@@ -1448,8 +1649,8 @@ function initSplitter() {
     if (savedRatio) {
       const parsed = parseFloat(savedRatio);
       if (!isNaN(parsed) && parsed >= 15 && parsed <= 85) {
-        paneLeft.style.flex = `0 0 ${parsed}%`;
-        paneRight.style.flex = `0 0 ${100 - parsed}%`;
+        paneLeft.style.flex = `1 1 ${parsed}%`;
+        paneRight.style.flex = `1 1 ${100 - parsed}%`;
       }
     }
   } catch (_) {}
@@ -1457,7 +1658,8 @@ function initSplitter() {
   let isDragging = false;
   let lastLeftPercentage = null;
 
-  splitter.addEventListener('mousedown', () => {
+  splitter.addEventListener('mousedown', (e) => {
+    e.preventDefault();
     isDragging = true;
     splitter.classList.add('dragging');
     document.body.style.cursor = 'col-resize';
@@ -1476,8 +1678,8 @@ function initSplitter() {
 
     const leftPercentage = (clampedOffset / totalWidth) * 100;
     lastLeftPercentage = leftPercentage;
-    paneLeft.style.flex = `0 0 ${leftPercentage}%`;
-    paneRight.style.flex = `0 0 ${100 - leftPercentage}%`;
+    paneLeft.style.flex = `1 1 ${leftPercentage}%`;
+    paneRight.style.flex = `1 1 ${100 - leftPercentage}%`;
 
     if (editorLeft) editorLeft.layout();
     if (editorRight) editorRight.layout();
@@ -1508,7 +1710,7 @@ function initSplitter() {
     } catch (_) {}
     if (editorLeft) editorLeft.layout();
     if (editorRight) editorRight.layout();
-    showToast('Reset split panes to 50/50');
+    showToast('split reset to 50/50');
   });
 
   window.addEventListener('resize', () => {
@@ -1554,10 +1756,17 @@ function initMonaco() {
       lineNumbers: 'on',
       scrollBeyondLastLine: false,
       renderWhitespace: 'selection',
-      cursorBlinking: 'smooth',
+      cursorBlinking: 'solid',
       smoothScrolling: true,
       tabSize: 2,
-      minimap: { enabled: true, maxColumn: 40, renderCharacters: false },
+      minimap: { enabled: false },
+      links: false,
+      renderLineHighlight: 'line',
+      padding: { top: 8, bottom: 8 },
+      scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8, useShadows: false },
+      overviewRulerBorder: false,
+      hideCursorInOverviewRuler: true,
+      guides: { indentation: true },
       // Auto-closing brackets, quotes, and surroundings
       autoClosingBrackets: 'always',
       autoClosingQuotes: 'always',
@@ -1618,6 +1827,9 @@ function initMonaco() {
     editorLeft.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
       runCodeOnCppServer();
     });
+    editorLeft.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => {
+      runX86Program();
+    });
 
     editorRight.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       saveCurrentFile();
@@ -1628,6 +1840,9 @@ function initMonaco() {
     editorRight.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
       runCodeOnCppServer();
     });
+    editorRight.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => {
+      runX86Program();
+    });
 
     applyTheme(currentTheme);
     renderTabs();
@@ -1636,7 +1851,7 @@ function initMonaco() {
     editorLeft.onDidChangeCursorPosition((e) => {
       const posDisplay = document.getElementById('cursor-pos');
       if (posDisplay) {
-        posDisplay.textContent = `Ln ${e.position.lineNumber}, Col ${e.position.column}`;
+        posDisplay.textContent = `${e.position.lineNumber}:${e.position.column}`;
       }
     });
 
@@ -1667,22 +1882,22 @@ function initMonaco() {
 
     updateCodeStats();
     updateOutputStats();
-    logConsole('Monaco Editor ready. Enter code on the left and click "Run" to test with your C++ server.', 'success');
+    logConsole('editor ready', 'dim');
   });
 }
 
 function initFallbackTextareas() {
-  logConsole('Using lightweight textarea fallback.', 'warn');
+  logConsole('monaco failed to load; using plain textarea', 'warn');
   const leftContainer = document.getElementById('editor-left');
   const rightContainer = document.getElementById('editor-right');
 
   const taLeft = document.createElement('textarea');
-  taLeft.style.cssText = 'width:100%;height:100%;background:#1e1e1e;color:#d4d4d4;font-family:monospace;padding:12px;border:none;resize:none;outline:none;font-size:13px;line-height:1.5;';
+  taLeft.style.cssText = 'width:100%;height:100%;background:var(--bg-primary);color:var(--text-main);font-family:var(--font-mono);padding:12px;border:none;resize:none;outline:none;font-size:13px;line-height:1.5;';
   taLeft.value = STARTER_CODE;
   leftContainer.appendChild(taLeft);
 
   const taRight = document.createElement('textarea');
-  taRight.style.cssText = 'width:100%;height:100%;background:#1e1e1e;color:#ce9178;font-family:monospace;padding:12px;border:none;resize:none;outline:none;font-size:13px;line-height:1.5;cursor:text;user-select:text;';
+  taRight.style.cssText = 'width:100%;height:100%;background:var(--bg-primary);color:var(--text-main);font-family:var(--font-mono);padding:12px;border:none;resize:none;outline:none;font-size:13px;line-height:1.5;cursor:text;user-select:text;';
   taRight.value = WAITING_PLACEHOLDER;
   taRight.readOnly = true; // Select and view only
   rightContainer.appendChild(taRight);
@@ -1784,6 +1999,29 @@ function setupEventListeners() {
     runCodeOnCppServer();
   });
 
+  // RUN x86 BUTTON: execute generated assembly in the terminal panel
+  const btnExec = document.getElementById('btn-exec');
+  if (btnExec) btnExec.addEventListener('click', () => runX86Program());
+
+  const stdinInput = document.getElementById('terminal-stdin-input');
+  if (stdinInput) {
+    stdinInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        runX86Program();
+      }
+    });
+  }
+
+  // Drawer tabs: Terminal / Server Logs
+  document.querySelectorAll('.drawer-tab').forEach((tab) => {
+    tab.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showDrawerPanel(tab.dataset.panel);
+      openDrawer();
+    });
+  });
+
   // Global Keyboard shortcuts:
   // - Ctrl+Enter / Cmd+Enter: Run code on compiler server
   // - Ctrl+S / Cmd+S: Save file directly to disk (or open save dialog if not yet saved)
@@ -1791,9 +2029,16 @@ function setupEventListeners() {
   // - Ctrl+/ / Cmd+/: Toggle line comment (#)
   // - Shift+Alt+F / Shift+Cmd+F / Shift+Option+F: Format Sajilo code
   window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
-      runCodeOnCppServer();
+      if (e.shiftKey) {
+        runX86Program();
+      } else {
+        runCodeOnCppServer();
+      }
     }
     if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
       e.preventDefault();
@@ -1823,7 +2068,7 @@ function setupEventListeners() {
       if (editorLeft) {
         if (editorLeft.setValue) editorLeft.setValue('');
         if (editorLeft.focus) editorLeft.focus();
-        showToast(`Cleared ${activeFile.name}!`);
+        showToast(`cleared ${activeFile.name}`);
       }
     });
   }
@@ -1836,16 +2081,12 @@ function setupEventListeners() {
     serverInput.addEventListener('change', (e) => {
       CONFIG.serverUrl = e.target.value.trim();
       saveConfigToLocalStorage();
-      const endpointVal = endpointDisplay ? endpointDisplay.querySelector('.endpoint-val') : null;
-      if (endpointVal) endpointVal.textContent = CONFIG.serverUrl;
-      showToast(`Compiler server endpoint set to ${CONFIG.serverUrl}`);
+      updateServerStatus('mock');
+      showToast(`endpoint: ${CONFIG.serverUrl}`);
       checkServerHealth();
     });
   }
-  if (endpointDisplay) {
-    const endpointVal = endpointDisplay.querySelector('.endpoint-val');
-    if (endpointVal) endpointVal.textContent = CONFIG.serverUrl;
-  }
+  updateServerStatus('mock');
 
   // Request format select (JSON vs raw text)
   const formatSelect = document.getElementById('request-format-select');
@@ -1854,21 +2095,21 @@ function setupEventListeners() {
     formatSelect.addEventListener('change', (e) => {
       CONFIG.requestFormat = e.target.value;
       saveConfigToLocalStorage();
-      showToast(`Request format set to: ${CONFIG.requestFormat}`);
+      showToast(`request format: ${CONFIG.requestFormat}`);
     });
   }
 
   // Click endpoint in bottom bar to quickly change URL
   if (endpointDisplay) {
     endpointDisplay.addEventListener('click', () => {
-      const newUrl = prompt('Enter compiler server endpoint URL:', CONFIG.serverUrl);
+      const newUrl = prompt('compile endpoint:', CONFIG.serverUrl);
       if (newUrl && newUrl.trim()) {
         CONFIG.serverUrl = newUrl.trim();
-        serverInput.value = CONFIG.serverUrl;
+        if (serverInput) serverInput.value = CONFIG.serverUrl;
         saveConfigToLocalStorage();
-        const endpointVal = endpointDisplay.querySelector('.endpoint-val');
-        if (endpointVal) endpointVal.textContent = CONFIG.serverUrl;
-        showToast(`Compiler server endpoint set to ${CONFIG.serverUrl}`);
+        updateServerStatus('mock');
+        showToast(`endpoint: ${CONFIG.serverUrl}`);
+        checkServerHealth();
       }
     });
   }
@@ -1880,7 +2121,7 @@ function setupEventListeners() {
     autoRunToggle.addEventListener('change', (e) => {
       CONFIG.autoRun = e.target.checked;
       saveConfigToLocalStorage();
-      showToast(CONFIG.autoRun ? 'Auto-run enabled on typing' : 'Auto-run disabled');
+      showToast(CONFIG.autoRun ? 'build on change: on' : 'build on change: off');
     });
   }
 
@@ -1894,21 +2135,13 @@ function setupEventListeners() {
     });
   }
 
-  // Status pill click to trigger run / test
-  const serverPill = document.getElementById('server-status-pill');
-  if (serverPill) {
-    serverPill.addEventListener('click', () => {
-      runCodeOnCppServer();
-    });
-  }
-
   // Theme selector dropdown
   document.querySelectorAll('#theme-menu [data-theme]').forEach((link) => {
     link.addEventListener('click', (e) => {
       e.preventDefault();
       const themeId = link.getAttribute('data-theme');
       applyTheme(themeId);
-      showToast(`Theme: ${link.textContent.trim()}`);
+      showToast(`theme: ${link.textContent.trim()}`);
       document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
     });
   });
@@ -1925,7 +2158,7 @@ function setupEventListeners() {
         if (editorLeft && editorLeft.setValue) {
           editorLeft.setValue(activeFile.content);
         }
-        showToast(`Loaded sample: ${link.textContent.trim()}`);
+        showToast(`sample: ${link.textContent.trim()}`);
         document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
       }
     });
@@ -1950,14 +2183,14 @@ function setupEventListeners() {
   document.getElementById('btn-copy-src').addEventListener('click', () => {
     if (!editorLeft) return;
     navigator.clipboard.writeText(editorLeft.getValue()).then(() => {
-      showToast('Copied active code!', 'success');
+      showToast('copied source', 'success');
     });
   });
 
   document.getElementById('btn-copy-ir').addEventListener('click', () => {
     if (!editorRight) return;
     navigator.clipboard.writeText(editorRight.getValue()).then(() => {
-      showToast('Copied output!', 'success');
+      showToast('copied out.asm', 'success');
     });
   });
 
@@ -1968,7 +2201,7 @@ function setupEventListeners() {
 
   document.getElementById('btn-download-ir').addEventListener('click', () => {
     if (!editorRight) return;
-    downloadFile('output.ir', editorRight.getValue());
+    downloadFile('out.asm', editorRight.getValue());
   });
 
   // Font size buttons
@@ -2104,10 +2337,16 @@ function setupEventListeners() {
   if (btnClearLogs) {
     btnClearLogs.addEventListener('click', (e) => {
       e.stopPropagation();
+      const activePanel = document.querySelector('.drawer-tab.active');
+      if (activePanel && activePanel.dataset.panel === 'terminal-output') {
+        const term = document.getElementById('terminal-output');
+        if (term) term.innerHTML = '';
+        return;
+      }
       const output = document.getElementById('console-output');
       if (output) output.innerHTML = '';
       const count = document.getElementById('log-count');
-      if (count) count.textContent = '0 messages';
+      if (count) count.textContent = '';
     });
   }
 }
@@ -2122,13 +2361,24 @@ function downloadFile(filename, content) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  showToast(`Downloaded ${filename}`, 'success');
+  showToast(`downloaded ${filename}`, 'success');
 }
 
 // ============================================================================
 // 8. ON DOM READY
 // ============================================================================
+function renderShortcutLabels() {
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const names = isMac
+    ? { mod: '⌘', shift: '⇧', enter: '↵' }
+    : { mod: 'Ctrl+', shift: 'Shift+', enter: 'Enter' };
+  document.querySelectorAll('kbd[data-keys]').forEach((kbd) => {
+    kbd.textContent = kbd.dataset.keys.split('+').map(k => names[k] || k).join('');
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  renderShortcutLabels();
   applyTheme(currentTheme);
   initSplitter();
   setupEventListeners();

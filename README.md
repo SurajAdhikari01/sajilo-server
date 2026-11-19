@@ -83,6 +83,24 @@ SAJILO_MOCK=1 ./build/backend/sajilo_server
 
 ---
 
+## ▶️ Running Generated x86-64 Code
+
+After compiling (Ctrl+Enter), click **Run x86** in the output pane (or press **Ctrl+Shift+Enter**).
+The output opens in the **Terminal** tab of the bottom drawer. Type into the `stdin` box to feed `read()`.
+
+The server exposes `POST /run` with body `{ "asm": "<nasm source>", "stdin": "..." }`. It runs
+`nasm -f elf64` → `ld` → `./prog` (5s limit) and returns `stage`, `stdout`, `stderr`, `exit_code`, `signal` and `timed_out`.
+
+The generated code targets **x86-64 Linux syscalls**, so the runner is chosen automatically:
+
+- **native**: the host is x86-64 Linux (needs `nasm`, `ld`, `timeout` in `PATH`)
+- **docker**: anything else, e.g. Apple Silicon. The server runs in a `linux/amd64` container with no network, 256 MB RAM and 64 pids.
+  On first use it builds the `sajilo-x86-runner` image (Debian + nasm + binutils). Docker Desktop must be running.
+
+Overrides: `SAJILO_RUNNER=native|docker`, `SAJILO_RUNNER_IMAGE=<image>`, `DOCKER_PATH=/path/to/docker`.
+
+---
+
 ## 🎨 Features & Highlights
 
 - **Multi-File Tabbed Editor**: Create, switch, close, and inline-rename `.sj` files.
